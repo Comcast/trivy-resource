@@ -1,0 +1,17 @@
+#!/bin/sh
+
+#source $(dirname $0)/common.sh
+source /opt/resource/common.sh
+
+################################################################################
+# Capture STDIN
+################################################################################
+
+payload=$(cat)
+
+
+warn '`in` is not supported by this resource'
+version=$(echo $payload | jq -r '.version')
+
+# Dummy response to keep Concourse happy
+echo "$version" >&3

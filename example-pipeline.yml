@@ -1,0 +1,52 @@
+resources:
+- name: main-src
+  type: git
+  source:
+    branch: main
+    uri: git@github.com:team/repo.git
+    private_key: ((git-ssh-key))
+  check_every: 48h
+
+- name: trivy-scan
+  type: trivy
+  source:
+    image: registry/namespace/app-name # image registry url here
+    user: registry-user # registry credentials
+    password: registry-password
+    format: json # required output format
+    type: os # scan type
+  check_every: 24h
+
+resource_types:
+- name: trivy
+  type: docker-image
+  source:
+    repository: repo/trivy-resource
+
+jobs:
+- name: build-release
+  public: true
+  plan:
+  - in_parallel:
+    - get: main-src
+      trigger: true
+  - task: build
+    privileged: true
+    config:
+      platform: linux
+      image_resource:
+        type: registry-image
+        source:
+          repository: concourse/oci-build-task
+      inputs:
+        - name: main-src
+          path: .
+      outputs:
+        - name: image
+      run:
+        path: build
+  on_success:
+    put: trivy-scan
+    params:
+      path: image/image.tar  # path to OCI tar
+      fail: HIGH  # fails on this vuln, comma separated

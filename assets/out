@@ -1,0 +1,191 @@
+#!/usr/local/bin/python
+import json
+import logging
+import os.path
+import sys
+import requests
+import subprocess
+import time
+
+# loading the pipeline json payload in a var
+payload = json.loads(input())
+
+# initialise logger
+logging.basicConfig(
+    format='%(levelname) -5s %(asctime)s %(funcName)- -20s: %(message)s',
+    datefmt='%d-%b-%y %H:%M:%S',
+    level=logging.INFO)
+log = logging.getLogger(__name__)
+
+# Loading vars from the payload
+# initialising all vars to None
+image_tar = image = scan_type = user = password = ship_to = fail_sev = None
+try:
+    if payload['source'] not in ('', None):
+        user = payload['source']['user'] if 'user' in payload['source'] else None
+        password = payload['source']['password'] if 'password' in payload['source'] else None
+        image = payload['source']['image'] if 'image' in payload['source'] else None
+        ship_to = payload['source']['json_server'] if 'json_server' in payload['source'] else None
+except KeyError as e:
+    log.warning(f"Options undefined : {e}")
+try:
+    if payload['params'] not in ('', None):
+        fail_sev = payload['params']['fail'].upper() if 'fail' in payload['params'] else None
+        image_tar = payload['params']['path'] if 'path' in payload['params'] else None
+except KeyError as e:
+    log.warning(f"Options undefined : {e}")
+output_format = payload['source']['format'] if payload['source'] and 'format' in payload[
+    'source'] else 'table'
+scan_type = payload['source']['type'] if payload['source'] and 'type' in payload['source'] else 'os'
+working_dir = sys.argv[1]
+allowed_params = ['', None, 'json', 'table', 'os', 'library']
+
+
+def get_image():
+    try:
+        # using skopeo to download image from registry dockerlessly
+        # Images are stored as docker-archive to facilitate easy scan
+        # Downloaded docker-archive is stored in `/tmp`
+        log.info(f"Downloading image {image}")
+        image_url = "docker://" + image
+        if user and password not in (None, ''):
+            try:
+                creds = '--src-creds=' + user + ':' + password
+                args = ("skopeo", "copy", creds, image_url, "docker-archive:/tmp/image.tar")
+                result, code = output(args)
+            except Exception as e:
+                log.error(f"Check credentials to download image from registry :: Error : {e}")
+                raise SystemExit(1)
+        else:
+            try:
+                args = ("skopeo", "copy", image_url, "docker-archive:/tmp/image.tar")
+                result, code = output(args)
+            except Exception as e:
+                log.error(f"unable to download image from registry, does the registry need creds? :: error : {e}")
+                raise SystemExit(1)
+        if code == 0:
+            log.info(f"Downloaded {image} successfully.")
+        else:
+            log.error(f"Issues in downloading {image} :: exit code : {code}")
+            raise SystemExit(1)
+    except Exception as e:
+        log.error(f"check image {image} for correctness/typo :: facing error {e}")
+
+
+def output(args):
+    # just runs the command supplied and returns the console output and exit code
+    popen = subprocess.Popen(args, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    popen.wait()
+    console_output = popen.stdout.read().decode("utf-8")
+    # writing output to a file for large outputs to be parsed easily
+    with open(os.path.join(working_dir, 'scan_output.txt'), 'w') as f:
+        print(console_output, file=f)
+    return console_output, popen.returncode
+
+
+def scanner():
+    try:
+        # input validation
+        if output_format not in allowed_params or scan_type not in allowed_params not in allowed_params:
+            log.error(f"Fatal: unrecognised params/source options passed. Check readme for accepted params/source "
+                      f"options")
+            raise SystemExit(1)
+        log.info(f"Identified docker image tarball to scan :: path :: {filename}")
+        # Scan by default ignores unfixed vulnerabilities
+        # These vulns cannot be fixed by patching the base-image
+        # fail_sev defined
+        if fail_sev:
+            log.info(f"Initiating trivy scan with vulnerability and severity filter: {scan_type} and "
+                     f"{fail_sev}\n")
+            args = ("trivy", "image", "--no-progress", "--ignore-unfixed", "--exit-code", "1", "--severity",
+                    fail_sev, "--vuln-type", scan_type, "--input", filename, "--format", output_format)
+            scan_result, code = output(args)
+            return scan_result, code
+        # fail_sev not defined
+        elif fail_sev in (None, ''):
+            log.info(f"Initiating trivy scan with vuln filter: {scan_type}, since no failure sev mentioned, "
+                     f"exit code will be 0")
+            args = ("trivy", "image", "--no-progress", "--ignore-unfixed", "--vuln-type", scan_type, "--input",
+                    filename, "--format", output_format)
+            scan_result, code = output(args)
+            return scan_result, code
+    except NameError or Exception as e:
+        # Exception in case of uncaught errors
+        log.warning(f"{e} :: Check the input parameters. Only OCI tars, library/os scans and json format output "
+                    f"supported")
+        raise SystemExit(1)
+
+
+def shipper(url, results):
+    # work in progress
+    # eventually - would ship vulnerability scan json output to central json server
+    try:
+        if url and output_format == 'json':
+            try:
+                response = requests.post(url, data=json.dumps(results), headers={'Content-Type': 'application/json'})
+                log.info(response)
+            except requests.exceptions.MissingSchema:
+                log.error(f"Invalid URL {url}: No schema supplied. Perhaps you meant http://{url}?")
+        elif url and output_format != 'json':
+            log.error(f"Please specify log format as json to ship to json server :: current format is {output_format}")
+            raise SystemExit(1)
+        else:
+            log.error("json server url not specified, scan results shipping aborted")
+            raise SystemExit(1)
+    except Exception as e:
+        log.error(f"Error shipping logs to json server, using {ship_to}, is this correct?")
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    filename = os.path.join(working_dir, image_tar) if image_tar not in ('', None) else None
+    log.info("Initiating scans.....")
+    # initialise timer
+    start = time.time()
+    # both image and path input given
+    if image not in (None, '') and image_tar not in (None, ''):
+        log.warning(f"Please specify either {image_tar} or {image}, not both")
+        raise SystemExit(1)
+    # only image input given
+    elif image and image_tar in ('', None):
+        get_image()
+        filename = '/tmp/image.tar'
+        result, exit_code = scanner()
+        with open(os.path.join(working_dir, 'scan_output.txt'), mode='r') as f:
+            log.info(f.read())
+        # log.info(result)
+        if exit_code != 0:
+            end = time.time()
+            log.info(f"Scanning completed, elapsed-time: {round(end - start, 2)}s")
+            log.warning(f"Scan results for {image} in above output :: Exit code: {exit_code}")
+            raise SystemExit(1)
+        else:
+            end = time.time()
+            log.info(f"Scanning completed, elapsed-time: {round(end - start, 2)}s")
+            log.warning(f"Scan results for {image} in above output :: Exit code: {exit_code}")
+    # only path input given
+    elif image_tar and image in ('', None) and os.path.exists(filename):
+        result, exit_code = scanner()
+        with open(os.path.join(working_dir, 'scan_output.txt'), mode='r') as f:
+            log.info(f.read())
+        # log.info(result)
+        if exit_code != 0:
+            end = time.time()
+            log.info(f"Scanning completed, elapsed-time: {round(end - start, 2)}s")
+            log.warning(f"Scan results for {image_tar} in above output :: Exit code: {exit_code}")
+            raise SystemExit(1)
+        else:
+            end = time.time()
+            log.info(f"elapsed-time: {round(end - start, 2)}s")
+            log.warning(f"Scan results for {image_tar} in above output :: Exit code: {exit_code}")
+    # both image and path parameters not given
+    else:
+        log.error(f"Scan inputs not defined :: provided image tar path : {image_tar}; provided image url : {image}; "
+                  f"please provide one of the values to scan")
+    # printing valid json with nested version key to stdout
+    # just concourse things
+    pipelinename = os.getenv('BUILD_PIPELINE_NAME')
+    ciurl = os.getenv('ATC_EXTERNAL_URL')
+    build = os.getenv('BUILD_ID')
+    print(f'{{"version": {{"version": "1.0.0"}},"metadata": [{{"name":"pipeline","value": "{pipelinename}"}},'
+          f'{{"name":"url","value":"{ciurl}/builds/{build}"}}]}}', file=sys.stdout)

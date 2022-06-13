@@ -1,0 +1,5 @@
+#!/usr/local/bin/python
+import sys
+# in is currently a no-op
+# dummy response to keep Concourse happy
+print('{"version": {"ref": "1.0.0"}}', file=sys.stdout)

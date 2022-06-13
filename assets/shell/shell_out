@@ -1,0 +1,85 @@
+#!/bin/sh
+
+set -e
+exec 3>&1 # make stdout available as file-descriptor 3 for the result
+
+# loading common script for warnings and info
+source $(dirname $0)/common.sh
+
+# cd to the put directory
+source=$1
+cd $source
+
+# loading the pipeline json payload in a var
+payload=$(cat)
+info "Initiating scans....."
+
+start=$(date +'%s')
+
+# Loading vars from the payload
+fail_sev=$(echo "$payload" | jq -r '.params.fail // ""')
+scan_type=$(echo "$payload" | jq -r '.params.type // ""')
+image_tar=$(echo "$payload" | jq -r '.params.path // ""')
+
+# Fail if no image tar path specified
+if [ -z "$image_tar" ]; then
+  warn "No tar file specified for scan"
+  exit 1
+fi
+
+# Scan by default ignores unfixed vulnerabilities
+# These vulns cannot be fixed by patching the base-image
+if [ -n "$image_tar"  ] ; then
+  echo "Identified docker image tar -> $image_tar"
+  # fail_sev and scan_type given
+  if [ -n "$fail_sev"  ] && [ -n "$scan_type" ]; then
+    info "Initiating trivy scan with vuln and severity filter: ${scan_type} & ${fail_sev}"
+    trivy image --no-progress --ignore-unfixed --exit-code 1 --severity ${fail_sev} --vuln-type ${scan_type} --input ${image_tar}
+    exit_code=$(echo $?)
+    if ["$exit_code" -ne 0]; then
+      warn "Trivy scan failed due to vulnerabilities with severity ${fail_sev}"
+    else
+      info "Hooray!! No Vulnerabilities found in scan :)"
+    fi
+  # only scan_type given
+  elif [ -n "$scan_type" ] && [ -z "$fail_sev" ]; then
+    info "Initiating trivy scan with vuln filter: ${scan_type}"
+    trivy image --no-progress --ignore-unfixed --vuln-type ${scan_type} --input ${image_tar}
+  # only fail_sev given
+  elif [ -z "$scan_type"  ] && [ -n "$fail_sev" ]; then
+    info "Initiating trivy scan with severity filter: ${fail_sev}"
+    trivy image --no-progress --ignore-unfixed --exit-code 1 --severity ${fail_sev} --input ${image_tar}
+    if ["$exit_code" -ne 0]; then
+      warn "Trivy scan failed due to vulnerabilities with severity ${fail_sev}"
+    else
+      info "Hooray!! No Vulnerabilities found in scan :)"
+    fi
+  else
+    # both fail_sev and scan_type not given
+    info "Initiating trivy complete scan: since there's no scan filters specified"
+    trivy image --no-progress --ignore-unfixed --input ${image_tar}
+  fi
+
+# Exception if the tar file is not present in specified path
+else
+  warn "Please specify image tar path properly."
+fi
+
+info "Process completed, elapsed-time: $(($(date +'%s') - $start))s"
+
+# Redirects the metadata + image digest that was just scanned to the console
+# Just concourse things
+if [ $(find . -maxdepth 2 -type f -name digest | wc -l) -ne 0 ]; then
+  jq -n "{
+  version: {
+    digest: $(cat $(find . -maxdepth 2 -type f -name digest) | jq -R .)
+  },
+  metadata: [
+    {\"name\":\"pipeline\",\"value\":$(echo $BUILD_PIPELINE_NAME | jq -R .)},
+    {\"name\":\"url\",\"value\":$(echo $ATC_EXTERNAL_URL/builds/$BUILD_ID | jq -R .)}
+    ]
+  }" 1>&3
+else
+  jq -n "{version:{msg:$(echo "error fetching digest/version" | jq -R .)},
+  metadata: [{\"name\":\"pipeline\",\"value\":$(echo $BUILD_PIPELINE_NAME | jq -R .)},{\"name\":\"url\",\"value\":$(echo $ATC_EXTERNAL_URL/builds/$BUILD_NAME | jq -R .)}]}" 1>&3
+fi
