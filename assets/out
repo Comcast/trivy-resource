@@ -25,7 +25,10 @@ try:
         user = payload['source']['user'] if 'user' in payload['source'] else None
         password = payload['source']['password'] if 'password' in payload['source'] else None
         image = payload['source']['image'] if 'image' in payload['source'] else None
-        ship_to = payload['source']['json_server'] if 'json_server' in payload['source'] else None
+        ship_to = payload['source']['dashboard'] if 'dashboard' in payload['source'] else None
+        app_name = payload['source']['app_name'] if 'app_name' in payload['source'] else None
+        output_format = payload['source']['format'] if 'format' in payload['source'] else 'table'
+        scan_type = payload['source']['type'] if 'type' in payload['source'] else 'os'
 except KeyError as e:
     log.warning(f"Options undefined : {e}")
 try:
@@ -34,9 +37,7 @@ try:
         image_tar = payload['params']['path'] if 'path' in payload['params'] else None
 except KeyError as e:
     log.warning(f"Options undefined : {e}")
-output_format = payload['source']['format'] if payload['source'] and 'format' in payload[
-    'source'] else 'table'
-scan_type = payload['source']['type'] if payload['source'] and 'type' in payload['source'] else 'os'
+# Directory path will be passed as an arg to the script, setting that to var here
 working_dir = sys.argv[1]
 allowed_params = ['', None, 'json', 'table', 'os', 'library']
 
@@ -48,7 +49,7 @@ def get_image():
         # Downloaded docker-archive is stored in `/tmp`
         log.info(f"Downloading image {image}")
         image_url = "docker://" + image
-        if user and password not in (None, ''):
+        if user and password:
             try:
                 creds = '--src-creds=' + user + ':' + password
                 args = ("skopeo", "copy", creds, image_url, "docker-archive:/tmp/image.tar")
@@ -75,18 +76,17 @@ def get_image():
 def output(args):
     # just runs the command supplied and returns the console output and exit code
     popen = subprocess.Popen(args, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    popen.wait()
-    console_output = popen.stdout.read().decode("utf-8")
+    console_output, errors = popen.communicate()
     # writing output to a file for large outputs to be parsed easily
     with open(os.path.join(working_dir, 'scan_output.txt'), 'w') as f:
-        print(console_output, file=f)
+        print(console_output.decode("utf-8"), file=f)
     return console_output, popen.returncode
 
 
 def scanner():
     try:
         # input validation
-        if output_format not in allowed_params or scan_type not in allowed_params not in allowed_params:
+        if output_format not in allowed_params or scan_type not in allowed_params:
             log.error(f"Fatal: unrecognised params/source options passed. Check readme for accepted params/source "
                       f"options")
             raise SystemExit(1)
@@ -109,6 +109,8 @@ def scanner():
                     filename, "--format", output_format)
             scan_result, code = output(args)
             return scan_result, code
+        else:
+            log.error(f"Please make sure the ship_to and app_name is specified. Current values are {ship_to} and {app_name}")
     except NameError or Exception as e:
         # Exception in case of uncaught errors
         log.warning(f"{e} :: Check the input parameters. Only OCI tars, library/os scans and json format output "
@@ -117,24 +119,28 @@ def scanner():
 
 
 def shipper(url, results):
-    # work in progress
-    # eventually - would ship vulnerability scan json output to central json server
+    # ships vulnerability scan json output to central json server
     try:
         if url and output_format == 'json':
             try:
-                response = requests.post(url, data=json.dumps(results), headers={'Content-Type': 'application/json'})
-                log.info(response)
+                # reads scan results from file
+                with open(os.path.join(working_dir, 'scan_output.txt'), 'r') as f:
+                    data = json.load(f)
+                data["appName"] = app_name
+                log.info(f"shipping vulnerability scan results for {app_name}")
+                response = requests.post(url + '/receive_json', json=data, headers={'Content-Type': 'application/json'})
+                log.info(f"Data posted to dashboard successfully! :: {response.status_code}")
+                log.info(f"Vulnerability dashboard: {url}")
             except requests.exceptions.MissingSchema:
                 log.error(f"Invalid URL {url}: No schema supplied. Perhaps you meant http://{url}?")
+            except Exception as e:
+                log.error(f"Error posting data to dashboard! :: {e}")
         elif url and output_format != 'json':
-            log.error(f"Please specify log format as json to ship to json server :: current format is {output_format}")
-            raise SystemExit(1)
+            log.error(f"Please specify log format as json to ship logs to dashboard! :: current format is {output_format}")
         else:
             log.error("json server url not specified, scan results shipping aborted")
-            raise SystemExit(1)
     except Exception as e:
-        log.error(f"Error shipping logs to json server, using {ship_to}, is this correct?")
-        raise SystemExit(1)
+        log.error(f"Error shipping logs to dashboard, using {ship_to}, is this correct? :: {e}")
 
 
 if __name__ == "__main__":
@@ -143,7 +149,7 @@ if __name__ == "__main__":
     # initialise timer
     start = time.time()
     # both image and path input given
-    if image not in (None, '') and image_tar not in (None, ''):
+    if image and image_tar:
         log.warning(f"Please specify either {image_tar} or {image}, not both")
         raise SystemExit(1)
     # only image input given
@@ -153,16 +159,19 @@ if __name__ == "__main__":
         result, exit_code = scanner()
         with open(os.path.join(working_dir, 'scan_output.txt'), mode='r') as f:
             log.info(f.read())
-        # log.info(result)
         if exit_code != 0:
             end = time.time()
             log.info(f"Scanning completed, elapsed-time: {round(end - start, 2)}s")
-            log.warning(f"Scan results for {image} in above output :: Exit code: {exit_code}")
+            log.error(f"Vulnerabilities in {image}! :: Exit code: {exit_code}")
+            if ship_to and app_name:
+                shipper(ship_to, result)
             raise SystemExit(1)
         else:
             end = time.time()
             log.info(f"Scanning completed, elapsed-time: {round(end - start, 2)}s")
             log.warning(f"Scan results for {image} in above output :: Exit code: {exit_code}")
+            if ship_to and app_name:
+                shipper(ship_to, result)
     # only path input given
     elif image_tar and image in ('', None) and os.path.exists(filename):
         result, exit_code = scanner()
@@ -172,12 +181,16 @@ if __name__ == "__main__":
         if exit_code != 0:
             end = time.time()
             log.info(f"Scanning completed, elapsed-time: {round(end - start, 2)}s")
-            log.warning(f"Scan results for {image_tar} in above output :: Exit code: {exit_code}")
+            log.warning(f"Vulnerabilities in  {image_tar}!! :: Exit code: {exit_code}")
+            if ship_to and app_name:
+                shipper(ship_to, result)
             raise SystemExit(1)
         else:
             end = time.time()
             log.info(f"elapsed-time: {round(end - start, 2)}s")
             log.warning(f"Scan results for {image_tar} in above output :: Exit code: {exit_code}")
+            if ship_to and app_name:
+                shipper(ship_to, result)
     # both image and path parameters not given
     else:
         log.error(f"Scan inputs not defined :: provided image tar path : {image_tar}; provided image url : {image}; "
