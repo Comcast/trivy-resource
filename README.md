@@ -37,9 +37,11 @@ The params on the other hand can be tweaked per call. Example the tar file path 
 * `type`: *Optional.* Scans either os or library vulns. Library vulns would require package.json or similar. Runs 
   scan for `os` by default.
 
-* `json_server`: *Optional.* Ships/POSTs scan results to a json server url provided here
+* `dashboard`: *Optional.* Ships/POSTs scan results to a dashboard server url provided here. 
 
-* `format`: *Optional.* scan output format, takes value `json|table`, by default outputs the scan results as table
+* `app_name` : *Optional.* The app name to be displayed on dashboard. This is mandatory if shipping scan results to dashboard
+
+* `format`: *Optional.* scan output format, takes value `json|table`, by default outputs the scan results as table. `json` as format is mandatory if shipping scan results to dashboard
 
 * `image`: *Optional, if `path` parameter defined.* Image to be scanned from registry. The specified image will be 
   downloaded as docker archive and scanned, might need credentials if registry pull needs authentication. 
@@ -99,6 +101,8 @@ happens on the updated image everytime
   type: trivy
   source:
     image: <docker-registry-namespace>/test # image that needs to be scanned
+    # Optional
+    dashboard: https://<dashboard-api-url-to-post-scan-results>
   check_every: 24h
 ```
 **Note:** In order to enable the use of trivy scans, so it can be quality gated via the pipeline, there are a few
